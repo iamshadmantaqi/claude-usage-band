@@ -476,7 +476,8 @@ function textPart(Text: Els['Text'], p: Part, key: string, space: boolean) {
 }
 
 function textBar(Text: Els['Text'], bar: NonNullable<Segment['bar']>) {
-  const filled = Math.round((bar.used / 100) * TEXT_BAR)
+  // Any share above zero shows at least one cell.
+  const filled = bar.used > 0 ? Math.max(1, Math.round((bar.used / 100) * TEXT_BAR)) : 0
   return (
     <Text key="bar">
       {' '}
