@@ -1,6 +1,6 @@
 import { test, expect, mock } from 'claude-code/testing'
 
-import { duration, money, tokens } from '../hooks/register.tsx'
+import { duration, money, tokens } from '../hooks/register'
 
 // 15 October 2026, 12:00 UTC.
 const NOW = Date.UTC(2026, 9, 15, 12, 0)
@@ -109,6 +109,13 @@ test('agents running and seen', async ($, on) => {
   expect(texts).toContain('1 running')
   expect(texts).toContain('/ 2')
   expect(all).toContain('Explore: Find the band')
+})
+
+test('no agents yet shows a muted 0', async ($, on) => {
+  world(on)
+  await $.session.start({ source: 'startup', cwd: '/tmp' } as any)
+  const { texts } = await band($, 'desktop')
+  expect(texts).toContain('0 agents')
 })
 
 test('terminal drops the details when narrow', async ($, on) => {
