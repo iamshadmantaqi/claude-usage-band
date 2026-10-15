@@ -1,0 +1,6 @@
+{
+  "name": "usage-band",
+  "owner": { "name": "Shadman Taqi" },
+  "metadata": { "description": "Usage Band, a Claude Code mod." },
+  "plugins": [{ "name": "usage-band", "source": "./", "description": "Context against your auto-compact window, plan limits, cache, cost and agents in one bar above the prompt." }]
+}
