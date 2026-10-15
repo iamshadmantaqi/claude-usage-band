@@ -1,7 +1,7 @@
 {
   "name": "usage-band",
   "displayName": "Usage Band",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "One tidy bar above the prompt: context against your auto-compact window, 5-hour and 7-day limits against the clock, prompt cache time left, session cost and running agents, each with a hover card.",
   "author": { "name": "Shadman Taqi" },
   "license": "MIT",

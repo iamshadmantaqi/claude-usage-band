@@ -383,7 +383,7 @@ function drawDesktop(els: Els, segments: Segment[]) {
   const Svg = (els as { Svg?: any }).Svg
   const half = Math.ceil(segments.length / 2)
   return (
-    <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={1} rowGap={0} paddingX={1}>
+    <Box flexDirection="row" flexWrap="wrap" justifyContent="center" alignItems="center" columnGap={1} rowGap={0} paddingX={1}>
       {segments.map((s, i) => (
         <Box key={s.key} flexDirection="row" alignItems="center" columnGap={1} flexShrink={0} paddingX={1} hover={{ backgroundColor: 'rgba(127,127,127,0.14)' }}>
           {s.icon ? <Svg key="icon" source={s.icon.svg} alt={s.icon.alt} width={14} height={14} /> : null}
@@ -453,7 +453,7 @@ function drawTerminal(els: Els, segments: Segment[], columns: number) {
     )
   })
   return (
-    <Box flexDirection="row" paddingX={1}>
+    <Box flexDirection="row" justifyContent="center" paddingX={1}>
       {children}
     </Box>
   )
