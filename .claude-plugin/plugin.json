@@ -1,12 +1,20 @@
 {
   "name": "usage-band",
   "displayName": "Usage Band",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "One tidy bar above the prompt: context against your auto-compact window, 5-hour and 7-day limits against the clock, prompt cache time left, session cost and running agents, each with a hover card.",
   "author": { "name": "Shadman Taqi" },
   "license": "MIT",
   "repository": "https://github.com/iamshadmantaqi/claude-usage-band",
   "homepage": "https://github.com/iamshadmantaqi/claude-usage-band",
-  "keywords": ["mod", "usage", "context", "rate-limits", "prompt-cache", "auto-compact"],
-  "types": "./types/index.d.ts"
+  "keywords": ["mod", "usage", "context", "rate-limits", "prompt-cache", "auto-compact", "job-queue"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "queueScript": {
+      "type": "string",
+      "title": "Job queue script",
+      "description": "Optional. Path to a job queue script whose `status` command lists its slots, waiting jobs, memory and load (see the README). Set, a row above the band shows them and opens a side pane. Empty hides the row.",
+      "default": ""
+    }
+  }
 }

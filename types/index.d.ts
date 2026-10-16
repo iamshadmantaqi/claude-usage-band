@@ -34,8 +34,32 @@ export type View = {
   seen: string[]
 }
 
+/** One job slot of the queue script, on this machine (`host` null) or a remote one. */
+export type QueueSlot = { n: number; host: string | null; label: string | null; kind: string; mins: number; cwd: string }
+/** A job waiting for a slot, in the order the queue serves them. */
+export type QueueWaiter = { pos: number; label: string; kind: string; mins: number; cwd: string }
+/** A remote machine the script sends jobs to: whether it is on, and its own memory and load line. */
+export type QueueHost = { name: string; slots: number; state: string; check: string; detail: string }
+/** One `status` reading of the queue script. */
+export type QueueSnapshot = {
+  local: QueueSlot[]
+  remote: QueueSlot[]
+  queue: QueueWaiter[]
+  memoryFree: string
+  pressure: string
+  /** The one-minute load average, as printed. */
+  load: string
+  /** The load at which the script runs one job at a time, when it says. */
+  loadLimit: number | null
+  chats: string
+  gate: string
+  gateOn: boolean
+  hosts: QueueHost[]
+}
+export type QueueReading = { at: number; snapshot: QueueSnapshot | null; error: string | null }
+
 declare module 'claude-code' {
   interface PluginState {
-    'usage-band': { view: View }
+    'usage-band': { view: View; queue: QueueReading; queueSections: Record<string, boolean> }
   }
 }

@@ -7,9 +7,10 @@
 // short, red at the edge. Every segment has a hover card in the app with the detail.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderChildren, SessionRateLimit } from 'claude-code'
+import type { EngineInterface, On, Register, RenderChildren, RenderElement, RenderInput, SessionRateLimit } from 'claude-code'
 
-import type { CacheHit, Context, RunningAgent, View } from '../types'
+import type { CacheHit, Context, QueueReading, QueueSlot, QueueWaiter, RunningAgent, View } from '../types'
+import { clock as queueClock, hostSummary, isOpen, loadTone, memoryTone, namesOf, oneDecimal, parseStatus, summary, used } from './queue'
 
 type $ = EngineInterface
 
@@ -44,9 +45,13 @@ let tokensAtSubmit: number | null = null
 let cachingOff = false
 let timer: { cancel: () => void } | null = null
 
-export const register: Register = (on) => {
+export const register: Register = (on, options) => {
+  const queueScript = String(options.queueScript ?? '').trim()
+  if (queueScript) registerQueue(on, queueScript)
+
   on('session.start', async ($, e, next) => {
     timer?.cancel()
+    if (queueScript) await startQueue($, queueScript)
     windowReadAt = 0
     cachingOff = Boolean(await $.env.get('DISABLE_PROMPT_CACHING'))
     const usage = await $.session.usage()
@@ -64,7 +69,10 @@ export const register: Register = (on) => {
   })
 
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'prompt_input_exit' || e.reason === 'other') timer?.cancel()
+    if (e.reason === 'prompt_input_exit' || e.reason === 'other') {
+      timer?.cancel()
+      stopQueue()
+    }
     return next(e)
   })
 
@@ -155,19 +163,27 @@ export const register: Register = (on) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
-    const v = (await read($, view)) ?? EMPTY
-    if (!v.context && v.limits.list.length === 0) return next(e)
-    const now = await $.clock.now()
-    const segments = segmentsOf(v, now)
     const els = $.ui.resolve(e)
-    const mine = e.surface === 'terminal' || !('Svg' in els) ? drawTerminal(els, segments, e.props.bodyColumns ?? 80) : drawDesktop(els, segments)
-    const below = await next(e)
-    if (!below) return mine
     const { Box } = els
-    return (
+    // The job queue row, when the option is set, sits a row of air above the band.
+    const row = queueScript ? await queueRow($, e) : null
+    const v = (await read($, view)) ?? EMPTY
+    const hasBand = Boolean(v.context || v.limits.list.length > 0)
+    const now = await $.clock.now()
+    const mine = hasBand ? (e.surface === 'terminal' || !('Svg' in els) ? drawTerminal(els, segmentsOf(v, now), e.props.bodyColumns ?? 80) : drawDesktop(els, segmentsOf(v, now))) : null
+    const below = await next(e)
+    const band = mine && below ? (
       <Box flexDirection="column">
         {mine}
         {below}
+      </Box>
+    ) : (mine ?? below)
+    if (!row) return band
+    if (!band) return row
+    return (
+      <Box flexDirection="column" rowGap={1}>
+        {row}
+        {band}
       </Box>
     )
   })
@@ -578,4 +594,256 @@ const dayTime = (ms: number) => fmt(ms, { weekday: 'short', day: 'numeric', mont
 function fit(text: string, n: number) {
   const c = [...text]
   return c.length > n ? c.slice(0, n - 1).join('') + '…' : text
+}
+
+// ---------- Job queue (optional: the queueScript option) ----------
+
+const QUEUE_PANE = 'job-queue'
+const QUEUE_EVERY = 5_000
+// A reading another session took this recently is used as it is.
+const QUEUE_FRESH = 4_000
+const QUEUE_STORE_KEY = 'queue-reading'
+
+const queueReading = atom({ plugin: 'usage-band', key: 'queue' } as const, { at: 0, snapshot: null, error: null } as QueueReading)
+const queueSections = atom({ plugin: 'usage-band', key: 'queueSections' } as const, {} as Record<string, boolean>)
+
+// Not drawn from: they start over on a reload, as session.start does.
+let queuePath = ''
+let queueName = 'Queue'
+let queueCores = 8
+let queueTimer: { cancel: () => void } | null = null
+let queueBusy = false
+
+// Every session runs the same timer, so the newest reading lives in the store and only a session that finds it
+// stale runs the script: one run per few seconds for the whole machine, not one per session.
+// True when the stored reading was fresh enough to use.
+async function adoptQueueReading($: $) {
+  const now = await $.clock.now()
+  const shared = (await $.store.get(QUEUE_STORE_KEY)) as QueueReading | undefined
+  if (!shared || !shared.snapshot) return false
+  await update($, queueReading, (prev) => (prev && prev.at >= shared.at ? prev : shared))
+  return now - shared.at < QUEUE_FRESH
+}
+
+async function refreshQueue($: $, force = false) {
+  if (!force && (await adoptQueueReading($))) return
+  if (queueBusy) return
+  queueBusy = true
+  try {
+    const ran = await $.process.run([queuePath, 'status'], { timeoutMs: 20_000 })
+    const at = await $.clock.now()
+    const next: QueueReading =
+      ran.exitCode === 0
+        ? { at, snapshot: parseStatus(ran.stdout), error: null }
+        : { at, snapshot: null, error: (ran.stderr || ran.stdout).trim().split('\n')[0] || `exit ${ran.exitCode}` }
+    await update($, queueReading, (prev) => (next.snapshot || !prev?.snapshot ? next : { ...prev, error: next.error }))
+    if (next.snapshot) await $.store.set(QUEUE_STORE_KEY, next)
+  } catch (err) {
+    const at = await $.clock.now()
+    await update($, queueReading, (prev) => ({ at, snapshot: prev?.snapshot ?? null, error: String((err as Error)?.message ?? err) }))
+  } finally {
+    queueBusy = false
+  }
+}
+
+async function queuePaneOpen($: $) {
+  return (await $.ui.panes()).some((p) => p.id === QUEUE_PANE)
+}
+
+async function toggleQueuePane($: $) {
+  if (await queuePaneOpen($)) await $.ui.close({ id: QUEUE_PANE })
+  else await $.ui.open({ id: QUEUE_PANE, title: `${queueName} queue` })
+}
+
+// The row above the band, or null while there is no reading yet.
+export async function queueRow($: $, e: RenderInput<'AbovePrompt'>): Promise<RenderElement | null> {
+    const s = (await read($, queueReading))?.snapshot
+    if (!s) return null
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const sum = summary(s)
+    const calm = sum.queue === 0 && !s.gateOn
+    return (
+      <Box key="queue-row" flexDirection="row" justifyContent="center" alignItems="center" columnGap={1} paddingX={1}>
+        <Button
+          key="queue-row-chip"
+          plain
+          dimColor={calm}
+          label={[`${calm ? '◇' : '◆'} ${queueName}  Mac ${sum.mac}`, ...sum.hosts.filter((x) => x.isOn).map((x) => `${x.name} ${x.count}`), `Queue ${sum.queue}`].join(' · ')}
+          onPress={() => toggleQueuePane($)}
+        />
+        {sum.hosts
+          .filter((x) => !x.isOn)
+          .map((x) => (
+            <Text key={`off-${x.name}`} color="error">
+              {x.name} off
+            </Text>
+          ))}
+        {sum.queue > 0 ? <Text color="warning">{sum.queue} waiting</Text> : null}
+        {s.gateOn ? <Text color="warning">gate on</Text> : null}
+        <Text dimColor>·</Text>
+        <Text color={memoryTone(s.pressure)} dimColor={!memoryTone(s.pressure)}>
+          Mem {s.memoryFree || '?'} free
+        </Text>
+        <Text color={loadTone(s.load, queueCores, s.loadLimit)} dimColor={!loadTone(s.load, queueCores, s.loadLimit)}>
+          Load {oneDecimal(s.load)}
+        </Text>
+      </Box>
+    )
+}
+
+// Called from the band's own session.start, since a plugin hooks an event once without a matcher.
+export async function startQueue($: $, path: string) {
+  queueTimer?.cancel()
+  const home = (await $.env.get('HOME')) ?? ''
+  queuePath = path.startsWith('~/') ? home + path.slice(1) : path
+  try {
+    const ran = await $.process.run(['sysctl', '-n', 'hw.ncpu'], { timeoutMs: 5_000 })
+    queueCores = Number(ran.stdout.trim()) || queueCores
+  } catch {
+    // Not macOS: the default stands.
+  }
+  await $.command.register({ name: namesOf(path).command, description: `Show or hide the ${queueName.toLowerCase()} queue pane` })
+  // The last reading any session took draws at once; a stale one is replaced in the background.
+  await adoptQueueReading($)
+  void refreshQueue($)
+  queueTimer = $.clock.every(QUEUE_EVERY, () => refreshQueue($))
+}
+
+export function stopQueue() {
+  queueTimer?.cancel()
+}
+
+// The queue's own command and pane, both matched to it.
+function registerQueue(on: On, path: string) {
+  const names = namesOf(path)
+  queueName = names.name
+
+  on('command.run', { command: names.command }, async ($) => {
+    const wasOpen = await queuePaneOpen($)
+    await toggleQueuePane($)
+    if (!wasOpen) await refreshQueue($, true)
+    return { text: wasOpen ? `${queueName} queue pane closed.` : `${queueName} queue pane opened.` }
+  })
+
+  on('ui.render', { component: 'Pane', requestId: QUEUE_PANE }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const r = await read($, queueReading)
+    const s = r?.snapshot
+    const open = (await read($, queueSections)) ?? {}
+
+    if (!s) {
+      return (
+        <Box flexDirection="column">
+          <Text dimColor>{r?.error ? `${queueName} status failed: ${r.error}` : `Reading ${queueName.toLowerCase()} status…`}</Text>
+          <Button key="refresh" label="Refresh" onPress={() => refreshQueue($, true)} />
+        </Box>
+      )
+    }
+
+    const toggle = (id: string) => () => update($, queueSections, (o) => ({ ...(o ?? {}), [id]: !isOpen(o ?? {}, id, s) }))
+
+    // A section header: the arrow and name are the button, its count sits beside it.
+    const header = (id: string, title: string, count: string, tone?: 'warning' | 'error') => (
+      <Box key={`head-${id}`} flexDirection="row" gap={1}>
+        <Button key={`sec-${id}`} plain label={`${isOpen(open, id, s) ? '▾' : '▸'} ${title}`} onPress={toggle(id)} />
+        <Text color={tone} dimColor={!tone}>
+          {count}
+        </Text>
+      </Box>
+    )
+
+    const slotRow = (slot: QueueSlot) =>
+      slot.label ? (
+        <Box key={`${slot.host ?? 'mac'}-${slot.n}`} flexDirection="row" gap={1}>
+          <Text color="success">●</Text>
+          <Text wrap="truncate-end">{slot.label}</Text>
+          <Text dimColor>
+            {slot.kind} · {slot.mins} min
+          </Text>
+        </Box>
+      ) : null
+
+    const freeRow = (key: string, free: number) =>
+      free > 0 ? (
+        <Text key={key} dimColor>
+          ○ {free} free
+        </Text>
+      ) : null
+
+    const hostsByName = new Map(s.hosts.map((x) => [x.name, x]))
+    const remoteHosts = [...new Set(s.remote.map((x) => x.host ?? ''))]
+    const queued = s.queue as QueueWaiter[]
+    const sum = summary(s)
+    const stale = r && r.error ? ` · last read failed: ${r.error}` : ''
+
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+          <Text bold>Mac {sum.mac}</Text>
+          {sum.hosts.map((x) => (
+            <Text key={`top-${x.name}`} bold color={x.isOn ? undefined : 'error'}>
+              {x.name} {x.isOn ? x.count : 'off'}
+            </Text>
+          ))}
+          <Text bold color={queued.length ? 'warning' : undefined}>
+            Queue {queued.length}
+          </Text>
+        </Box>
+
+        <Box flexDirection="column">
+          {header('queue', 'Queue', queued.length ? `${queued.length} waiting` : 'empty', queued.length ? 'warning' : undefined)}
+          {isOpen(open, 'queue', s)
+            ? queued.map((w) => (
+                <Box key={`q-${w.pos}`} flexDirection="row" gap={1}>
+                  <Text color="warning">{w.pos}.</Text>
+                  <Text wrap="truncate-end">{w.label}</Text>
+                  <Text dimColor>
+                    {w.kind} · waiting {w.mins} min
+                  </Text>
+                </Box>
+              ))
+            : null}
+        </Box>
+
+        <Box flexDirection="column">
+          {header('mac', 'This Mac', sum.mac)}
+          {isOpen(open, 'mac', s) ? s.local.map(slotRow) : null}
+          {isOpen(open, 'mac', s) ? freeRow('mac-free', s.local.length - used(s.local)) : null}
+        </Box>
+
+        {remoteHosts.map((host) => {
+          const slots = s.remote.filter((x) => (x.host ?? '') === host)
+          const info = hostsByName.get(host)
+          const down = Boolean(info && info.state !== 'on')
+          const id = `host-${host}`
+          return (
+            <Box key={id} flexDirection="column">
+              {header(id, host, down ? `${info?.state}` : `${used(slots)}/${slots.length}`, down ? 'error' : undefined)}
+              {isOpen(open, id, s) ? (
+                <Box flexDirection="column">
+                  {info?.detail ? <Text dimColor>{hostSummary(info.detail)}</Text> : null}
+                  {down && info?.check ? <Text color="error">last check: {info.check}</Text> : null}
+                  {slots.map(slotRow)}
+                  {freeRow(`free-${host}`, slots.length - used(slots))}
+                </Box>
+              ) : null}
+            </Box>
+          )
+        })}
+
+        <Box flexDirection="column">
+          <Text dimColor>
+            Memory free {s.memoryFree || '?'} · pressure {s.pressure || '?'} · load {s.load || '?'} · chats {s.chats || '?'}
+          </Text>
+          <Text color={s.gateOn ? 'warning' : undefined} dimColor={!s.gateOn}>
+            Gate {s.gateOn ? `on: ${s.gate}` : 'off'}
+          </Text>
+          <Text dimColor>
+            Updated {queueClock(r!.at)}{stale}
+          </Text>
+        </Box>
+        <Button key="refresh" label="Refresh" onPress={() => refreshQueue($, true)} />
+      </Box>
+    )
+  })
 }
